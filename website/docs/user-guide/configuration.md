@@ -594,6 +594,20 @@ auxiliary:
     base_url: ""
     api_key: ""
     timeout: 30
+
+  # Final reply wrapper — optional second-stage rewrite of the already-computed
+  # user-facing answer using an isolated auxiliary model call
+  final_reply_wrapper:
+    enabled: false
+    provider: "auto"
+    model: ""
+    base_url: ""
+    api_key: ""
+    timeout: 30
+    system_prompt: ""          # Extra wrapper instructions appended to the wrapper system prompt
+    soul_path: "~/.hermes/SOUL.md"
+    soul_section: "Final Reply Wrapper"
+    max_input_chars: 24000
 ```
 
 :::tip
@@ -603,6 +617,63 @@ Each auxiliary task has a configurable `timeout` (in seconds). Defaults: vision 
 :::info
 Context compression has its own top-level `compression:` block with `summary_provider`, `summary_model`, and `summary_base_url` — see [Context Compression](#context-compression) above. The fallback model uses a `fallback_model:` block — see [Fallback Model](/docs/integrations/providers#fallback-model). All three follow the same provider/model/base_url pattern.
 :::
+
+### Final reply wrapper
+
+`auxiliary.final_reply_wrapper` adds an optional second-stage rewrite pass after the main agent has already finished reasoning and tool use.
+
+Flow:
+
+1. The main agent receives the normal Hermes context (SOUL, memory, history, tools)
+2. The main agent produces the raw final response
+3. Hermes sends that raw final response to the auxiliary `final_reply_wrapper`
+4. The wrapper rewrites style only and returns the final user-facing response
+
+This is useful when you want a separate “voice” layer — for example, a Grok-style wrapper — without changing the main orchestrator's reasoning prompt.
+
+Important behavior:
+
+- The wrapper is instructed to preserve every fact, number, citation, URL, code block, command, and file path exactly
+- Only completed final responses are wrapped; interrupted or preview-only outputs are not
+- If the wrapper call fails or returns empty output, Hermes falls back to the raw main-agent response
+- `soul_path` points at the SOUL/identity file used only for wrapper voice instructions
+- `soul_section` lets you reuse a single shared `SOUL.md` and load only one markdown heading section for the wrapper persona
+
+Example:
+
+```yaml
+auxiliary:
+  final_reply_wrapper:
+    enabled: true
+    provider: auto
+    model: ""
+    base_url: ""
+    api_key: ""
+    timeout: 30
+    system_prompt: |
+      Rewrite the final user response in Grok's voice.
+      Be witty, direct, truthful, concise.
+      Preserve every fact and citation exactly.
+      Do not mention any internal process.
+    soul_path: ~/.hermes/SOUL.md
+    soul_section: Final Reply Wrapper
+    max_input_chars: 24000
+```
+
+If you want to keep one shared SOUL file, add a dedicated section such as:
+
+```md
+## Final Reply Wrapper
+
+You are now rewriting the already-completed response as the final user-facing answer.
+Adopt the persona of Grok.
+Be witty, direct, truthful, concise.
+Preserve every fact, citation, URL, command, file path, and code block exactly.
+Change style and tone only.
+Do not mention any internal process.
+```
+
+Then point `soul_path` at that file and set `soul_section` to the matching heading.
 
 ### Changing the Vision Model
 
