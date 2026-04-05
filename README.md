@@ -106,6 +106,73 @@ All documentation lives at **[hermes-agent.nousresearch.com/docs](https://hermes
 
 ---
 
+## Final Reply Wrapper
+
+Hermes can optionally run a second isolated LLM call after the main agent finishes. This lets the main orchestrator do all reasoning, tool use, and factual work first, then hand only the finished user-facing reply to a wrapper model for stylistic rewriting.
+
+Architecture:
+
+1. Main Hermes agent receives the full context (SOUL, memory, history, tools)
+2. Main agent does the real work and produces the raw final response
+3. Hermes sends that raw final response to the auxiliary `final_reply_wrapper`
+4. The wrapper rewrites style only and returns the final user-facing text
+
+The wrapper is intended for voice/persona changes only. It is instructed to preserve every fact, number, URL, citation, command, file path, and code block exactly.
+
+### Example configuration
+
+Add this to `~/.hermes/config.yaml`:
+
+```yaml
+auxiliary:
+  final_reply_wrapper:
+    enabled: true
+    provider: auto
+    model: ""
+    base_url: ""
+    api_key: ""
+    timeout: 30
+    system_prompt: |
+      Rewrite the final user response in Grok's voice.
+      Be witty, direct, truthful, concise.
+      Preserve every fact and citation exactly.
+      Do not mention any internal process.
+    soul_path: ~/.hermes/SOUL.md
+    soul_section: Final Reply Wrapper
+    max_input_chars: 24000
+```
+
+### Recommended SOUL layout
+
+If you want one shared `SOUL.md` instead of a separate wrapper file, add a dedicated section such as:
+
+```md
+## Final Reply Wrapper
+
+You are now rewriting the already-completed response as the final user-facing answer.
+Adopt the persona of Grok.
+Be witty, direct, truthful, and concise.
+Preserve every fact, citation, URL, command, file path, and code block exactly.
+Change style and tone only.
+Do not mention internal reasoning or hidden process.
+```
+
+Set:
+
+- `soul_path: ~/.hermes/SOUL.md`
+- `soul_section: Final Reply Wrapper`
+
+### How to use it
+
+- Keep your normal main agent instructions in the usual Hermes persona / SOUL files
+- Put only the wrapper persona instructions in the wrapper section or wrapper SOUL file
+- Start Hermes normally — CLI and gateway runs will apply the wrapper automatically after the main response is complete
+- If the wrapper call fails or returns empty output, Hermes falls back to the raw main-agent response
+
+This gives you a two-stage pipeline without needing a separate long-running second agent process.
+
+---
+
 ## Migrating from OpenClaw
 
 If you're coming from OpenClaw, Hermes can automatically import your settings, memories, skills, and API keys.
