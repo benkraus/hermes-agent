@@ -926,6 +926,72 @@ class TestBuildAssistantMessage:
         assert "extra_content" not in result["tool_calls"][0]
 
 
+class TestFinalReplyWrapper:
+    def test_extract_markdown_section_returns_named_section(self, agent):
+        content = "# Intro\nignore\n\n# Final Reply Wrapper\nuse this\nline 2\n\n## Nested\nstill included\n\n# Other\nstop"
+        result = agent._extract_markdown_section(content, "Final Reply Wrapper")
+        assert result == "use this\nline 2\n\n## Nested\nstill included"
+
+    def test_load_final_reply_wrapper_soul_prefers_named_section(self, agent, tmp_path):
+        soul_path = tmp_path / "SOUL.md"
+        soul_path.write_text(
+            "# Main\nmain persona\n\n# Final Reply Wrapper\nwrapper persona\n",
+            encoding="utf-8",
+        )
+        agent._final_reply_wrapper_config = {
+            "enabled": True,
+            "soul_path": str(soul_path),
+            "soul_section": "Final Reply Wrapper",
+        }
+
+        assert agent._load_final_reply_wrapper_soul() == "wrapper persona"
+
+    def test_wrap_final_response_success(self, agent):
+        agent._final_reply_wrapper_config = {
+            "enabled": True,
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 30,
+            "system_prompt": "",
+            "soul_path": "~/.hermes/SOUL.md",
+            "soul_section": "Final Reply Wrapper",
+            "max_input_chars": 24000,
+        }
+
+        with patch("agent.auxiliary_client.call_llm", return_value=_mock_response(content="Wrapped answer")):
+            wrapped, meta = agent._wrap_final_response("Raw answer")
+
+        assert wrapped == "Wrapped answer"
+        assert meta["applied"] is True
+        assert meta["raw_response"] == "Raw answer"
+        assert meta["wrapped_response"] == "Wrapped answer"
+
+    def test_wrap_final_response_falls_back_on_error(self, agent):
+        agent._final_reply_wrapper_config = {
+            "enabled": True,
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 30,
+            "system_prompt": "",
+            "soul_path": "~/.hermes/SOUL.md",
+            "soul_section": "Final Reply Wrapper",
+            "max_input_chars": 24000,
+        }
+
+        with patch("agent.auxiliary_client.call_llm", side_effect=RuntimeError("wrapper failed")):
+            wrapped, meta = agent._wrap_final_response("Raw answer")
+
+        assert wrapped == "Raw answer"
+        assert meta["applied"] is False
+        assert meta["raw_response"] == "Raw answer"
+        assert meta["wrapped_response"] == "Raw answer"
+        assert "wrapper failed" in meta["error"]
+
+
 class TestFormatToolsForSystemMessage:
     def test_no_tools_returns_empty_array(self, agent):
         agent.tools = []
@@ -1433,6 +1499,60 @@ class TestRunConversation:
             result = agent.run_conversation("hello")
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
+
+    def test_stop_finish_reason_uses_final_reply_wrapper(self, agent):
+        self._setup_agent(agent)
+        agent._final_reply_wrapper_config = {
+            "enabled": True,
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 30,
+            "system_prompt": "",
+            "soul_path": "~/.hermes/SOUL.md",
+            "soul_section": "Final Reply Wrapper",
+            "max_input_chars": 24000,
+        }
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_wrap_final_response", return_value=(
+                "Wrapped final answer",
+                {
+                    "applied": True,
+                    "raw_response": "Final answer",
+                    "wrapped_response": "Wrapped final answer",
+                    "error": None,
+                },
+            )),
+        ):
+            result = agent.run_conversation("hello")
+        assert result["final_response"] == "Wrapped final answer"
+        assert result["raw_final_response"] == "Final answer"
+        assert result["final_reply_wrapper"]["applied"] is True
+        assert result["messages"][-1]["raw_content"] == "Final answer"
+        assert result["messages"][-1]["content"] == "Wrapped final answer"
+
+    def test_stop_finish_reason_skips_wrapper_when_disabled(self, agent):
+        self._setup_agent(agent)
+        agent._final_reply_wrapper_config = {"enabled": False}
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_wrap_final_response") as mock_wrap,
+        ):
+            result = agent.run_conversation("hello")
+        mock_wrap.assert_not_called()
+        assert result["final_response"] == "Final answer"
+        assert result["raw_final_response"] == "Final answer"
+        assert result["final_reply_wrapper"]["applied"] is False
 
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)

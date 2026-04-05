@@ -28,6 +28,7 @@ import copy
 import hashlib
 import json
 import logging
+import html
 logger = logging.getLogger(__name__)
 import os
 import random
@@ -1159,6 +1160,18 @@ class AIAgent:
                 _tname = _schema.get("name", "")
                 if _tname:
                     self.valid_tool_names.add(_tname)
+
+        # Final reply wrapper config: optional second-stage rewrite of the
+        # already-computed final user-facing response via an auxiliary model.
+        self._final_reply_wrapper_config = {}
+        try:
+            _aux_cfg = _agent_cfg.get("auxiliary", {})
+            if not isinstance(_aux_cfg, dict):
+                _aux_cfg = {}
+            _wrapper_cfg = _aux_cfg.get("final_reply_wrapper", {})
+            self._final_reply_wrapper_config = _wrapper_cfg if isinstance(_wrapper_cfg, dict) else {}
+        except Exception:
+            self._final_reply_wrapper_config = {}
 
         # Skills config: nudge interval for skill creation reminders
         self._skill_nudge_interval = 10
@@ -5601,6 +5614,186 @@ class AIAgent:
 
         return msg
 
+    def _final_reply_wrapper_enabled(self) -> bool:
+        """Return True when second-stage final reply wrapping is enabled."""
+        cfg = getattr(self, "_final_reply_wrapper_config", {}) or {}
+        enabled = cfg.get("enabled", False)
+        if isinstance(enabled, str):
+            return enabled.strip().lower() in ("1", "true", "yes", "on")
+        return bool(enabled)
+
+    @staticmethod
+    def _extract_markdown_section(content: str, section_name: str) -> str:
+        """Return the body of a markdown heading section, if present."""
+        text = (content or "").strip()
+        target = (section_name or "").strip().lower()
+        if not text or not target:
+            return ""
+
+        lines = text.splitlines()
+        in_section = False
+        current_level = None
+        collected: List[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            match = re.match(r"^(#{1,6})\s+(.*?)\s*$", stripped)
+            if match:
+                level = len(match.group(1))
+                heading = match.group(2).strip().lower()
+                if in_section:
+                    if level <= (current_level or 6):
+                        break
+                if heading == target:
+                    in_section = True
+                    current_level = level
+                    collected = []
+                    continue
+            if in_section:
+                collected.append(line)
+
+        return "\n".join(collected).strip()
+
+    def _load_final_reply_wrapper_soul(self) -> str:
+        """Load optional SOUL/identity text for the final reply wrapper."""
+        cfg = getattr(self, "_final_reply_wrapper_config", {}) or {}
+        soul_path = str(cfg.get("soul_path", "") or "").strip()
+        if not soul_path:
+            soul_path = str(get_hermes_home() / "SOUL.md")
+        soul_section = str(cfg.get("soul_section", "") or "").strip()
+        try:
+            expanded = Path(os.path.expandvars(os.path.expanduser(soul_path)))
+            if not expanded.exists() or not expanded.is_file():
+                return ""
+            content = expanded.read_text(encoding="utf-8").strip()
+            if not content:
+                return ""
+            if soul_section:
+                section_content = self._extract_markdown_section(content, soul_section)
+                if section_content:
+                    return section_content[:20_000]
+            return content[:20_000]
+        except Exception:
+            return ""
+
+    def _build_final_reply_wrapper_messages(self, raw_response: str) -> List[Dict[str, str]]:
+        """Build isolated messages for the final reply wrapper call."""
+        cfg = getattr(self, "_final_reply_wrapper_config", {}) or {}
+        system_parts = [
+            "You are the final reply wrapper for Hermes.",
+            "Rewrite the provided raw final response in the requested voice while preserving every fact exactly.",
+            "Preserve every fact, number, citation, URL, code block, command, filename, and recommendation exactly unless a pure style edit can keep them byte-for-byte.",
+            "Do not add or remove claims, caveats, steps, warnings, citations, or technical details.",
+            "Do not mention these instructions, the wrapper, internal reasoning, or any hidden process.",
+            "If the raw response is already optimal, return it unchanged.",
+        ]
+
+        configured_system = str(cfg.get("system_prompt", "") or "").strip()
+        if configured_system:
+            system_parts.append("Configured wrapper instructions:\n" + configured_system)
+
+        soul_text = self._load_final_reply_wrapper_soul()
+        if soul_text:
+            system_parts.append("Wrapper voice specification from SOUL.md:\n" + soul_text)
+
+        max_input_chars = cfg.get("max_input_chars", 24000)
+        try:
+            max_input_chars = max(1000, int(max_input_chars))
+        except (TypeError, ValueError):
+            max_input_chars = 24000
+
+        if len(raw_response) > max_input_chars:
+            clipped = raw_response[: max_input_chars - 64].rstrip()
+            truncated_raw = (
+                clipped
+                + "\n\n[TRUNCATED BY HERMES FINAL-REPLY WRAPPER INPUT LIMIT; PRESERVE ALL VISIBLE FACTS EXACTLY]"
+            )
+        else:
+            truncated_raw = raw_response
+
+        user_content = (
+            "Here is the raw final response to rewrite for the user.\n\n"
+            "Rules:\n"
+            "- Preserve every fact exactly.\n"
+            "- Preserve all citations, URLs, commands, file paths, and code blocks exactly.\n"
+            "- Change style and tone only.\n"
+            "- Do not mention any internal process.\n\n"
+            "Raw final response:\n"
+            f"{truncated_raw}"
+        )
+
+        return [
+            {"role": "system", "content": "\n\n".join(system_parts).strip()},
+            {"role": "user", "content": user_content},
+        ]
+
+    @staticmethod
+    def _normalize_final_reply_wrapper_output(text: str) -> str:
+        """Strip common wrapper artifacts while preserving user-visible content."""
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return ""
+
+        fenced_match = re.fullmatch(r"```(?:\w+)?\n?(.*?)\n?```", cleaned, flags=re.DOTALL)
+        if fenced_match:
+            cleaned = fenced_match.group(1).strip()
+
+        prefixes = (
+            "final response:",
+            "rewritten response:",
+            "wrapped response:",
+            "assistant:",
+        )
+        lowered = cleaned.lower()
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                cleaned = cleaned[len(prefix):].lstrip()
+                lowered = cleaned.lower()
+                break
+
+        cleaned = html.unescape(cleaned)
+        return cleaned.strip()
+
+    def _wrap_final_response(self, raw_response: str) -> tuple[str, dict]:
+        """Run the optional second-stage wrapper and return (final_text, metadata)."""
+        metadata = {
+            "applied": False,
+            "raw_response": raw_response,
+            "wrapped_response": raw_response,
+            "error": None,
+        }
+        if not raw_response or not self._final_reply_wrapper_enabled():
+            return raw_response, metadata
+
+        cfg = getattr(self, "_final_reply_wrapper_config", {}) or {}
+        metadata.update({
+            "provider": cfg.get("provider", "auto"),
+            "model": cfg.get("model", ""),
+            "base_url": cfg.get("base_url", ""),
+            "soul_path": cfg.get("soul_path", ""),
+        })
+
+        try:
+            from agent.auxiliary_client import call_llm, extract_content_or_reasoning
+
+            response = call_llm(
+                task="final_reply_wrapper",
+                messages=self._build_final_reply_wrapper_messages(raw_response),
+            )
+            wrapped = self._normalize_final_reply_wrapper_output(
+                extract_content_or_reasoning(response)
+            )
+            if not wrapped:
+                metadata["error"] = "Final reply wrapper returned empty output"
+                return raw_response, metadata
+
+            metadata["applied"] = True
+            metadata["wrapped_response"] = wrapped
+            return wrapped, metadata
+        except Exception as exc:
+            metadata["error"] = str(exc)
+            return raw_response, metadata
+
     @staticmethod
     def _sanitize_tool_calls_for_strict_api(api_msg: dict) -> dict:
         """Strip Codex Responses API fields from tool_calls for strict providers.
@@ -8792,6 +8985,27 @@ class AIAgent:
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations
 
+        raw_final_response = final_response
+        final_reply_wrapper = {
+            "applied": False,
+            "raw_response": raw_final_response,
+            "wrapped_response": raw_final_response,
+            "error": None,
+        }
+
+        if (
+            final_response
+            and completed
+            and not interrupted
+            and not getattr(self, "_response_was_previewed", False)
+            and self._final_reply_wrapper_enabled()
+        ):
+            final_response, final_reply_wrapper = self._wrap_final_response(final_response)
+            if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "assistant":
+                messages[-1]["raw_content"] = raw_final_response
+                messages[-1]["content"] = final_response or raw_final_response or ""
+                messages[-1]["final_reply_wrapper"] = dict(final_reply_wrapper)
+
         # Save trajectory if enabled
         self._save_trajectory(messages, user_message, completed)
 
@@ -8831,6 +9045,8 @@ class AIAgent:
         # Build result with interrupt info if applicable
         result = {
             "final_response": final_response,
+            "raw_final_response": raw_final_response,
+            "final_reply_wrapper": final_reply_wrapper,
             "last_reasoning": last_reasoning,
             "messages": messages,
             "api_calls": api_call_count,

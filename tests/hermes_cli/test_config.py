@@ -112,6 +112,19 @@ class TestSaveAndLoadRoundtrip:
             reloaded = load_config()
             assert reloaded["terminal"]["timeout"] == 999
 
+    def test_final_reply_wrapper_roundtrip(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config = load_config()
+            config["auxiliary"]["final_reply_wrapper"]["enabled"] = True
+            config["auxiliary"]["final_reply_wrapper"]["soul_path"] = "~/.hermes/SOUL.md"
+            config["auxiliary"]["final_reply_wrapper"]["soul_section"] = "Final Reply Wrapper"
+            save_config(config)
+
+            reloaded = load_config()
+            assert reloaded["auxiliary"]["final_reply_wrapper"]["enabled"] is True
+            assert reloaded["auxiliary"]["final_reply_wrapper"]["soul_path"] == "~/.hermes/SOUL.md"
+            assert reloaded["auxiliary"]["final_reply_wrapper"]["soul_section"] == "Final Reply Wrapper"
+
 
 class TestSaveEnvValueSecure:
     def test_save_env_value_writes_without_stdout(self, tmp_path, capsys):

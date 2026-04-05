@@ -285,6 +285,16 @@ class TestDefaultConfigShape:
         assert "summary_base_url" in compression
         assert compression["summary_base_url"] is None
 
+    def test_final_reply_wrapper_structure(self):
+        from hermes_cli.config import DEFAULT_CONFIG
+        wrapper = DEFAULT_CONFIG["auxiliary"]["final_reply_wrapper"]
+        assert wrapper["enabled"] is False
+        assert wrapper["provider"] == "auto"
+        assert wrapper["model"] == ""
+        assert wrapper["soul_path"] == "~/.hermes/SOUL.md"
+        assert wrapper["soul_section"] == "Final Reply Wrapper"
+        assert wrapper["max_input_chars"] == 24000
+
 
 # ── CLI defaults parity ─────────────────────────────────────────────────────
 

@@ -359,6 +359,18 @@ DEFAULT_CONFIG = {
             "api_key": "",
             "timeout": 30,
         },
+        "final_reply_wrapper": {
+            "enabled": False,
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 30,
+            "system_prompt": "",
+            "soul_path": "~/.hermes/SOUL.md",
+            "soul_section": "Final Reply Wrapper",
+            "max_input_chars": 24000,
+        },
     },
     
     "display": {
