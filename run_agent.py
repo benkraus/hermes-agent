@@ -537,6 +537,7 @@ class AIAgent:
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
         persist_session: bool = True,
+        service_tier: str = None,
     ):
         """
         Initialize the AI Agent.
@@ -571,6 +572,7 @@ class AIAgent:
             prefill_messages (List[Dict]): Messages to prepend to conversation history as prefilled context.
                 Useful for injecting a few-shot example or priming the model's response style.
                 Example: [{"role": "user", "content": "Hi!"}, {"role": "assistant", "content": "Hello!"}]
+            service_tier (str): Optional OpenAI-compatible latency tier hint (e.g. "priority").
             platform (str): The interface platform the user is on (e.g. "cli", "telegram", "discord", "whatsapp").
                 Used to inject platform-specific formatting hints into the system prompt.
             skip_context_files (bool): If True, skip auto-injection of SOUL.md, AGENTS.md, and .cursorrules
@@ -684,6 +686,7 @@ class AIAgent:
         self.max_tokens = max_tokens  # None = use model default
         self.reasoning_config = reasoning_config  # None = use default (medium for OpenRouter)
         self.prefill_messages = prefill_messages or []  # Prefilled conversation turns
+        self.service_tier = self._resolve_service_tier(service_tier)
         
         # Anthropic prompt caching: auto-enabled for Claude models via OpenRouter.
         # Reduces input costs by ~75% on multi-turn conversations by caching the
@@ -1555,6 +1558,23 @@ class AIAgent:
     def _is_anthropic_url(self) -> bool:
         """Return True when the base URL targets Anthropic (native or /anthropic proxy path)."""
         return "api.anthropic.com" in self._base_url_lower or self._base_url_lower.rstrip("/").endswith("/anthropic")
+
+    def _resolve_service_tier(self, service_tier: str | None) -> str | None:
+        """Resolve OpenAI-compatible service tier from arg, config, or env."""
+        if isinstance(service_tier, str) and service_tier.strip():
+            return service_tier.strip().lower()
+        try:
+            from hermes_cli.config import load_config as _load_agent_config
+            _agent_cfg = _load_agent_config()
+            _model_cfg = _agent_cfg.get("model") or {}
+            if isinstance(_model_cfg, dict):
+                _cfg_service_tier = str(_model_cfg.get("service_tier") or "").strip().lower()
+                if _cfg_service_tier:
+                    return _cfg_service_tier
+        except Exception:
+            pass
+        _env_service_tier = os.getenv("HERMES_SERVICE_TIER", "").strip().lower()
+        return _env_service_tier or None
 
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
@@ -3364,7 +3384,7 @@ class AIAgent:
         allowed_keys = {
             "model", "instructions", "input", "tools", "store",
             "reasoning", "include", "max_output_tokens", "temperature",
-            "tool_choice", "parallel_tool_calls", "prompt_cache_key",
+            "tool_choice", "parallel_tool_calls", "prompt_cache_key", "service_tier",
         }
         normalized: Dict[str, Any] = {
             "model": model,
@@ -3391,8 +3411,8 @@ class AIAgent:
         if isinstance(temperature, (int, float)):
             normalized["temperature"] = float(temperature)
 
-        # Pass through tool_choice, parallel_tool_calls, prompt_cache_key
-        for passthrough_key in ("tool_choice", "parallel_tool_calls", "prompt_cache_key"):
+        # Pass through tool_choice, parallel_tool_calls, prompt_cache_key, service_tier
+        for passthrough_key in ("tool_choice", "parallel_tool_calls", "prompt_cache_key", "service_tier"):
             val = api_kwargs.get(passthrough_key)
             if val is not None:
                 normalized[passthrough_key] = val
@@ -5294,6 +5314,8 @@ class AIAgent:
 
             if self.max_tokens is not None:
                 kwargs["max_output_tokens"] = self.max_tokens
+            if self.service_tier:
+                kwargs["service_tier"] = self.service_tier
 
             return kwargs
 
@@ -5384,6 +5406,9 @@ class AIAgent:
                 api_kwargs["max_tokens"] = _model_output_limit
             except Exception:
                 pass  # fail open — let OpenRouter pick its default
+
+        if self.service_tier:
+            api_kwargs["service_tier"] = self.service_tier
 
         extra_body = {}
 

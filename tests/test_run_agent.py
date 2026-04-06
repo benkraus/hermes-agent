@@ -799,6 +799,13 @@ class TestBuildApiKwargs:
         assert kwargs["messages"] is messages
         assert kwargs["timeout"] == 1800.0
 
+    def test_resolve_service_tier_from_config(self, agent, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"model": {"service_tier": "priority"}},
+        )
+        assert agent._resolve_service_tier(None) == "priority"
+
     def test_provider_preferences_injected(self, agent):
         agent.base_url = "https://openrouter.ai/api/v1"
         agent.providers_allowed = ["Anthropic"]
@@ -871,6 +878,22 @@ class TestBuildApiKwargs:
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
         assert kwargs["max_tokens"] == 4096
+
+    def test_service_tier_injected_for_chat_completions(self, agent):
+        agent.service_tier = "priority"
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert kwargs["service_tier"] == "priority"
+
+    def test_service_tier_injected_for_responses(self, agent):
+        agent.model = "gpt-5.4"
+        agent.api_mode = "codex_responses"
+        agent.service_tier = "priority"
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert kwargs["service_tier"] == "priority"
+        normalized = agent._preflight_codex_api_kwargs(kwargs)
+        assert normalized["service_tier"] == "priority"
 
 
 class TestBuildAssistantMessage:

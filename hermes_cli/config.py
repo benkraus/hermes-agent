@@ -198,7 +198,13 @@ def ensure_hermes_home():
 # =============================================================================
 
 DEFAULT_CONFIG = {
-    "model": "",
+    "model": {
+        "default": "",
+        "provider": "",
+        "base_url": "",
+        "service_tier": "",
+        "api_mode": "",
+    },
     "providers": {},
     "fallback_providers": [],
     "credential_pool_strategies": {},
